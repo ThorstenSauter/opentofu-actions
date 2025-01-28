@@ -1,0 +1,55 @@
+﻿name: 'OpenTofu apply'
+description: >-
+  Runs the OpenTofu apply command in the given infrastructure directory. This includes the installation of the OpenTofu CLI.
+inputs:
+  resource-group:
+    description: 'The name of the resource group containing the storage account for the OpenTofu backend configuration.'
+    required: true
+  storage-account:
+    description: 'The name of the storage account containing the OpenTofu backend configuration.'
+    required: true
+  container:
+    description: 'The name of the Blob Storage container containing the OpenTofu backend configuration.'
+    required: true
+  state-file:
+    description: 'The name of the OpenTofu state file.'
+    required: true
+  infra-directory:
+    description: 'The path to the OpenTofu source directory.'
+    required: true
+  opentofu-version:
+    description: 'The version of OpenTofu to install. Defaults to latest.'
+    required: false
+    default: 'latest'
+  lock-timeout:
+    description: >-
+      The duration OpenTofu will wait to acquire a state lock during an init or apply.
+      The format has to follow the OpenTofu CLIs requirement of a number followed by a unit.
+      Defaults to 5m.
+    required: false
+    default: '5m'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup OpenTofu
+      uses: opentofu/setup-opentofu@v1
+      with:
+        tofu_version: ${{ inputs.opentofu-version }}
+        tofu_wrapper: false
+    - name: OpenTofu init
+      id: init
+      shell: bash
+      working-directory: ${{ inputs.infra-directory }}
+      run: |
+        opentofu init \
+        -backend-config="resource_group_name=${{ inputs.resource-group }}" \
+        -backend-config="storage_account_name=${{ inputs.storage-account }}" \
+        -backend-config="container_name=${{ inputs.container }}" \
+        -backend-config="key=${{ inputs.state-file }}" \
+        -lock-timeout=${{ inputs.lock-timeout }}
+    - name: OpenTofu Apply
+      id: apply
+      shell: bash
+      working-directory: ${{ inputs.infra-directory }}
+      run: tofuu apply -auto-approve -input=false -lock-timeout=${{ inputs.lock-timeout }}

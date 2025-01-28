@@ -1,0 +1,121 @@
+﻿name: 'OpenTofu validate'
+description: >-
+  Validates the OpenTofu configuration in the given infrastructure directory and displays the validation result as a
+  pull request comment. This includes the installation of the OpenTofu CLI, TFLint and trivy.
+inputs:
+  github-token:
+    description: 'The GitHub token used to create and update the pull request comment.'
+    required: true
+  infra-directory:
+    description: 'The path to the OpenTofu source directory.'
+    required: true
+  skip-trivy:
+    description: 'Skip the trivy scan. Defaults to false.'
+    required: false
+    default: 'false'
+  opentofu-version:
+    description: 'The version of OpenTofu to install. Defaults to latest.'
+    required: false
+    default: 'latest'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup OpenTofu
+      uses: opentofu/setup-opentofu@v1
+      with:
+        tofu_version: ${{ inputs.opentofu-version }}
+        tofu_wrapper: false
+    - name: OpenTofu formatting check
+      id: format
+      shell: bash
+      working-directory: ${{ inputs.infra-directory }}
+      continue-on-error: true
+      run: tofu fmt -check -recursive
+    - name: Setup TFLint
+      uses: terraform-linters/setup-tflint@v4
+      continue-on-error: true
+      with:
+        tflint_version: latest
+    - name: Init TFLint
+      shell: bash
+      working-directory: ${{ inputs.infra-directory }}
+      run: tflint --init
+    - name: Run TFLint
+      id: tflint
+      shell: bash
+      working-directory: ${{ inputs.infra-directory }}
+      continue-on-error: true
+      run: tflint --no-color -f compact
+    - name: Run Trivy scanner
+      uses: aquasecurity/trivy-action@0.29.0
+      if: ${{ inputs.skip-trivy == 'false' }}
+      id: trivy
+      continue-on-error: true
+      with:
+        scan-type: config
+        scan-ref: ${{ inputs.infra-directory }}
+        hide-progress: true
+        exit-code: 1
+        output: trivy.txt
+    - name: Publish Trivy Output to Summary
+      if: ${{ inputs.skip-trivy == 'false' }}
+      shell: bash
+      run: |
+        if [[ -s trivy.txt ]]; then
+          {
+            echo "### Trivy scan output"
+            echo "<details><summary>Click to expand</summary>"
+            echo ""
+            echo '```opentofu'
+            cat trivy.txt
+            echo '```'
+            echo "</details>"
+          } >> $GITHUB_STEP_SUMMARY
+        fi
+    - name: OpenTofu Validate
+      id: validate
+      shell: bash
+      working-directory: ${{ inputs.infra-directory }}
+      continue-on-error: true
+      run: tofu validate -no-color
+    - name: Create or update PR comment
+      uses: actions/github-script@v7
+      if: github.event_name == 'pull_request'
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          })
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes('OpenTofu validation')
+          })
+
+          const output = `### OpenTofu validation
+          #### OpenTofu format 🖌\`${{ steps.format.outcome }}\`
+          #### OpenTofu Validation 🤖\`${{ steps.validate.outcome }}\`
+          #### Trivy scan 🔎\`${{ steps.trivy.outcome || 'skipped' }}\`
+          #### TFLint 👓\`${{ steps.tflint.outcome }}\``;
+
+          if (botComment) {
+            github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: output
+            })
+          } else {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+          }
+    - name: Validation status
+      if: steps.format.outcome == 'failure' || steps.validate.outcome == 'failure' || steps.tflint.outcome == 'failure' || steps.trivy.outcome == 'failure'
+      shell: bash
+      run: exit 1

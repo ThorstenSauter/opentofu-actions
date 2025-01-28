@@ -1,0 +1,109 @@
+﻿name: 'OpenTofu plan'
+description: >-
+  Runs the OpenTofu plan command in the given infrastructure directory and displays the plan output as a pull request
+  comment. This includes the installation of the OpenTofu CLI.
+inputs:
+  environment-name:
+    description: 'The name of the environment to plan.'
+    required: true
+  github-token:
+    description: 'The GitHub token used to create and update the pull request comment.'
+    required: true
+  resource-group:
+    description: 'The name of the resource group containing the storage account for the OpenTofu backend configuration.'
+    required: true
+  storage-account:
+    description: 'The name of the storage account containing the OpenTofu backend configuration.'
+    required: true
+  container:
+    description: 'The name of the Blob Storage container containing the OpenTofu backend configuration.'
+    required: true
+  state-file:
+    description: 'The name of the OpenTofu state file.'
+    required: true
+  infra-directory:
+    description: 'The path to the OpenTofu source directory.'
+    required: true
+  opentofu-version:
+    description: 'The version of OpenTofu to install. Defaults to latest.'
+    required: false
+    default: 'latest'
+  lock-timeout:
+    description: >-
+      The duration OpenTofu will wait to acquire a state lock during an init or plan.
+      The format has to follow the OpenTofu CLIs requirement of a number followed by a unit.
+      Defaults to 5m.
+    required: false
+    default: '5m'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup OpenTofu
+      uses: opentofu/setup-opentofu@v1
+      with:
+        tofu_version: ${{ inputs.opentofu-version }}
+    - name: OpenTofu init
+      id: init
+      shell: bash
+      working-directory: ${{ inputs.infra-directory }}
+      run: |
+        opentofu init \
+        -backend-config="resource_group_name=${{ inputs.resource-group }}" \
+        -backend-config="storage_account_name=${{ inputs.storage-account }}" \
+        -backend-config="container_name=${{ inputs.container }}" \
+        -backend-config="key=${{ inputs.state-file }}" \
+        -lock-timeout=${{ inputs.lock-timeout }}
+    - name: OpenTofu plan
+      id: plan
+      shell: bash
+      working-directory: ${{ inputs.infra-directory }}
+      continue-on-error: true
+      run: tofuu plan -no-color -input=false -lock-timeout=${{ inputs.lock-timeout }}
+    - name: Create or update PR comment
+      uses: actions/github-script@v7
+      if: github.event_name == 'pull_request'
+      env:
+        PLAN: "opentofu\n${{ steps.plan.outputs.stdout }}"
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          })
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes('${{ inputs.environment-name }} environment')
+          })
+
+          const output = `### ${{ inputs.environment-name }} environment
+          #### OpenTofu Plan 📖\`${{ steps.plan.outcome }}\`
+
+          <details><summary>Show Plan</summary>
+
+          \`\`\`\n
+          ${process.env.PLAN}
+          \`\`\`
+
+          </details>`;
+
+          if (botComment) {
+            github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: output
+            })
+          } else {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })
+          }
+    - name: OpenTofu plan status
+      if: steps.plan.outcome == 'failure'
+      shell: bash
+      run: exit 1
